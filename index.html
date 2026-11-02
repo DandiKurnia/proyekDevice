@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Parkir Kapasitas Kendaraan</title>
+  <!-- ponytail: Play CDN cukup untuk tugas; produksi ganti Tailwind CLI build -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* ponytail: warna status via CSS var; pindah ke token kalau tema nambah */
+    ::selection { background: #facc15; color: #0f172a; }
+
+    #panel {
+      background: var(--bg);
+      color: var(--fg);
+      transition: background-color .45s cubic-bezier(.16,1,.3,1), color .45s;
+    }
+    /* hijau-700 / kuning-400 / merah-700: shade brand yang lolos AA untuk teks kecil */
+    #panel[data-state="hijau"]  { --bg:#15803d; --fg:#ffffff; --muted:#dcfce7; --track:rgb(255 255 255 / .22); --fill:#ffffff; }
+    #panel[data-state="kuning"] { --bg:#facc15; --fg:#0f172a; --muted:#78350f; --track:rgb(15 23 42 / .16);   --fill:#0f172a; }
+    #panel[data-state="merah"]  { --bg:#b91c1c; --fg:#ffffff; --muted:#fee2e2; --track:rgb(255 255 255 / .22); --fill:#ffffff; }
+
+    #panel .muted { color: var(--muted); }
+    #panel .track { background: var(--track); }
+    #bar { background: var(--fill); }
+
+    .lampu { transition: transform .4s cubic-bezier(.16,1,.3,1), opacity .3s, filter .3s; }
+    .lampu-item[data-aktif="false"] .lampu { opacity: .35; filter: grayscale(1); transform: scale(.88); }
+    .lampu-item[data-aktif="false"] .lampu-label { color: #64748b; }
+    .lampu-item[data-aktif="true"] .lampu { transform: scale(1.14); }
+    .lampu-item[data-aktif="true"] .lampu-label { color: #0f172a; font-weight: 600; }
+
+    @media (prefers-reduced-motion: reduce) { #panel, .lampu { transition: none; } }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-800 flex items-center justify-center p-4">
+  <main class="w-full max-w-md bg-white rounded-2xl shadow-[0_18px_40px_-24px_rgb(15_23_42_/_0.45)] overflow-hidden">
+    <header class="flex items-center justify-between px-6 pt-6">
+      <h1 class="text-xl font-bold text-slate-900">Parkir Kendaraan</h1>
+      <span id="koneksi" class="text-xs px-2 py-1 rounded-full bg-slate-200 text-slate-600">Menghubungkan…</span>
+    </header>
+
+    <section id="panel" data-state="kuning" class="mt-5 p-6">
+      <p id="status" class="text-2xl font-bold tracking-tight" aria-live="polite">–</p>
+      <p class="muted mt-5 text-sm">Kendaraan di dalam</p>
+      <p class="text-7xl font-extrabold tabular-nums leading-none mt-1" aria-live="polite">
+        <span id="counter">–</span><span class="muted text-3xl font-semibold">/10</span>
+      </p>
+      <p class="muted mt-2 text-sm">Slot kosong: <span id="sisa">–</span></p>
+      <div class="track mt-4 h-3 rounded-full overflow-hidden" role="progressbar" aria-valuemin="0" aria-valuemax="10">
+        <div id="bar" class="h-full w-0 transition-all duration-500"></div>
+      </div>
+    </section>
+
+    <!-- Lampu sama dengan ESP32: hijau <5, kuning 5-9, merah 10 -->
+    <section class="flex justify-center gap-8 px-6 py-7">
+      <div class="lampu-item flex flex-col items-center gap-2" data-aktif="false">
+        <div id="lampu-hijau" class="lampu w-10 h-10 rounded-full bg-green-500"></div>
+        <span class="lampu-label text-xs">Tersedia</span>
+      </div>
+      <div class="lampu-item flex flex-col items-center gap-2" data-aktif="false">
+        <div id="lampu-kuning" class="lampu w-10 h-10 rounded-full bg-yellow-400"></div>
+        <span class="lampu-label text-xs">Hampir penuh</span>
+      </div>
+      <div class="lampu-item flex flex-col items-center gap-2" data-aktif="false">
+        <div id="lampu-merah" class="lampu w-10 h-10 rounded-full bg-red-500"></div>
+        <span class="lampu-label text-xs">Penuh</span>
+      </div>
+    </section>
+  </main>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js";
+    import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyApFod9L59CliC8C40aJAgI6C0xBdd-dKY",
+      authDomain: "parking-2357d.firebaseapp.com",
+      databaseURL: "https://parking-2357d-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "parking-2357d",
+      storageBucket: "parking-2357d.firebasestorage.app",
+      messagingSenderId: "224630988244",
+      appId: "1:224630988244:web:90030e55804d08f6e40a41"
+    };
+
+    const KAPASITAS_MAX = 10;
+    const BATAS_HIJAU = 5;
+    const db = getDatabase(initializeApp(firebaseConfig));
+    const $ = id => document.getElementById(id);
+
+    onValue(ref(db, "kendaraan"), snap => {
+      const n = Math.min(Math.max(Number(snap.val()) || 0, 0), KAPASITAS_MAX);
+      const penuh = n >= KAPASITAS_MAX;
+      const hijau = n < BATAS_HIJAU;
+
+      $("counter").textContent = n;
+      $("sisa").textContent = KAPASITAS_MAX - n;
+      $("bar").style.width = `${(n / KAPASITAS_MAX) * 100}%`;
+      $("bar").parentElement.setAttribute("aria-valuenow", n);
+
+      $("panel").dataset.state = penuh ? "merah" : hijau ? "hijau" : "kuning";
+      $("status").textContent = penuh ? "PARKIR PENUH" : hijau ? "Slot tersedia" : "Hampir penuh";
+
+      $("lampu-hijau").parentElement.dataset.aktif = hijau;
+      $("lampu-kuning").parentElement.dataset.aktif = !penuh && !hijau;
+      $("lampu-merah").parentElement.dataset.aktif = penuh;
+    }, err => {
+      $("koneksi").textContent = "Error";
+      $("koneksi").className = "text-xs px-2 py-1 rounded-full bg-red-100 text-red-700";
+      console.error(err);
+    });
+
+    // Status koneksi realtime ke Firebase
+    onValue(ref(db, ".info/connected"), snap => {
+      const on = snap.val() === true;
+      $("koneksi").textContent = on ? "Online" : "Offline";
+      $("koneksi").className = `text-xs px-2 py-1 rounded-full ${on ? "bg-green-100 text-green-800" : "bg-slate-200 text-slate-600"}`;
+    });
+  </script>
+</body>
+</html>
