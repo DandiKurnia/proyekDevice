@@ -17,7 +17,7 @@ Modul yang digunakan adalah **ESP32 Dev Module** (30/38 pin).
 | **Ultrasonik 2 (Keluar)** | TRIG | **GPIO 26** | Input/Output | `OUTPUT` | Mengirim pulsa trigger 10 µs |
 | **Ultrasonik 2 (Keluar)** | ECHO | **GPIO 35** | **Input Only** (tanpa pull-up) | `INPUT` | Menerima pantulan pulsa via `pulseIn()` |
 | **Servo 1 (Palang Masuk)** | Signal (Kuning/Oranye) | **GPIO 18** | Output (LEDC) | PWM 50 Hz | Buka 90° / Tutup 0° gerbang masuk |
-| **Servo 2 (Palang Keluar)** | Signal (Kuning/Oranye) | **GPIO 19** | Output (LEDC) | PWM 50 Hz | Buka 90° / Tutup 0° gerbang keluar |
+| **Servo 2 (Palang Keluar)** | Signal (Kuning/Oranye) | **GPIO 19** | Output (LEDC) | PWM 50 Hz | Buka 180° / Tutup 90° gerbang keluar |
 | **Buzzer Pasif** | Positif (+) | **GPIO 27** | Output (LEDC) | PWM 2 kHz | Bunyi 300 ms nada 2000 Hz saat mobil masuk |
 | **LED Merah** | Anoda (+) | **GPIO 16** | Output | `OUTPUT` | Menyala saat kapasitas **penuh** (10 kendaraan) |
 | **LED Kuning** | Anoda (+) | **GPIO 17** | Output | `OUTPUT` | Menyala saat **hampir penuh** (5–9 kendaraan) |
@@ -70,7 +70,7 @@ Modul yang digunakan adalah **ESP32 Dev Module** (30/38 pin).
                    onValue() listener aktif
 ```
 
-Dashboard juga mendukung dua arah secara logis: jika nilai `/kendaraan` diubah langsung di Firebase Console atau via REST API, ESP32 menerima nilainya lewat `FirebaseStream` dan langsung memperbarui posisi lampu LED fisiknya.
+Aliran data satu arah ESP32 → Firebase: setiap counter berubah, ESP32 menulis `/kendaraan` (`setIntAsync`, gagal = retry loop berikutnya). Saat boot, ESP32 membaca `/kendaraan` sekali agar counter tidak reset ke 0. Perubahan manual di Firebase Console setelah boot **tidak** ikut ke ESP32 (tertimpa saat kendaraan berikutnya lewat).
 
 ---
 

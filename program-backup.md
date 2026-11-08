@@ -1,5 +1,7 @@
 # Backup program.ino
 
+Versi offline (tanpa Firebase). Logika sensor/servo/buzzer/lampu berjalan lokal penuh.
+
 ```cpp
 // Sistem Kapasitas Kendaraan ESP32
 // Sensor 1 = pintu masuk  (counter +1, servo 1 buka, buzzer bunyi, ditolak jika penuh)
@@ -99,6 +101,7 @@ void setup() {
   buzzer.write(0); // diam
 
   updateLampu();
+
   Serial.println("Sistem siap. Kapasitas maks: 10 kendaraan");
 }
 

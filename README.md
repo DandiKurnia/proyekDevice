@@ -11,7 +11,7 @@ Penghitung kendaraan parkir (kapasitas 10). Sensor ultrasonik di pintu masuk dan
 | Ultrasonik 2 (keluar) | TRIG | 26 | OUTPUT | Pemicu pulsa |
 | Ultrasonik 2 (keluar) | ECHO | 35 | INPUT | Pantulan (input-only pin) |
 | Servo 1 (gerbang masuk) | Signal | 18 | PWM 50 Hz | Buka 90° / tutup 0° |
-| Servo 2 (gerbang keluar) | Signal | 19 | PWM 50 Hz | Buka 90° / tutup 0° |
+| Servo 2 (gerbang keluar) | Signal | 19 | PWM 50 Hz | Buka 180° / tutup 90° |
 | Buzzer pasif | + | 27 | PWM 2 kHz | Bunyi 300 ms saat mobil masuk |
 | LED merah | Anoda | 16 | OUTPUT | Parkir penuh (10) |
 | LED kuning | Anoda | 17 | OUTPUT | Hampir penuh (5–9) |
@@ -35,8 +35,8 @@ Semua GND komponen disatukan dengan GND ESP32.
 | Sensor 1 mendeteksi, counter = 10 | Gerbang masuk tetap tertutup |
 | Sensor 2 mendeteksi objek < 3 cm, counter > 0 | Counter −1, servo 2 buka |
 | Gerbang terbuka ≥ 2 detik dan sensor sudah bebas | Servo kembali menutup |
-| Counter berubah | Lampu diperbarui, nilai dikirim ke `/kendaraan` di Firebase |
-| `/kendaraan` diubah dari web/app | ESP32 menerima lewat stream dan memperbarui counter + lampu |
+| Counter berubah | Lampu diperbarui, nilai dikirim async ke `/kendaraan` di Firebase |
+| ESP32 boot | Membaca nilai terakhir `/kendaraan` agar counter sinkron setelah restart |
 
 Objek dianggap sudah lewat setelah sensor bebas deteksi 1 detik, supaya pembacaan yang sesekali gagal tidak menghitung ganda.
 

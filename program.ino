@@ -2,7 +2,7 @@
 // Sensor 1 = pintu masuk  (counter +1, servo 1 buka, buzzer bunyi, ditolak jika penuh)
 // Sensor 2 = pintu keluar (counter -1, servo 2 buka)
 // Lampu: hijau (<5), kuning (5-9), merah (10 = penuh)
-// Firebase: counter disimpan di /kendaraan, dibaca balik via FirebaseStream
+// Firebase: counter disimpan di /kendaraan (tulis saat berubah, baca nilai awal saat boot)
 
 #include <WiFi.h>
 #include <Firebase_ESP_Client.h>
@@ -28,20 +28,23 @@
 
 const int KAPASITAS_MAX = 10;
 const int BATAS_HIJAU = 5;             // counter < 5 -> hijau
-const int JARAK_DETEKSI = 3;          // cm
-const int SUDUT_TUTUP = 0;
-const int SUDUT_BUKA = 90;
+const int JARAK_DETEKSI = 3;          // cm (samakan dgn versi non-Firebase yg jalan)
+const int SERVO1_TUTUP = 180;   // gerbang masuk
+const int SERVO1_BUKA = 90;
+const int SERVO2_TUTUP = 0;  // gerbang keluar
+const int SERVO2_BUKA = 90;
 const unsigned long WAKTU_BUKA = 2000; // ms
 const unsigned long WAKTU_LEPAS = 1000; // ms bebas dari deteksi sebelum dianggap pergi
 const int NADA_BUZZER = 2000;          // Hz
 const unsigned long LAMA_BUNYI = 300;  // ms
+const unsigned long WIFI_TIMEOUT = 15000; // ms tunggu WiFi tiap setup
 
-FirebaseData stream; // khusus stream (baca)
-FirebaseData fbdo;   // khusus tulis
+FirebaseData fbdo; // dipakai bersama: baca awal + tulis counter (bergantian, bukan bareng)
 FirebaseAuth auth;
 FirebaseConfig config;
 bool firebaseAktif = false;
-volatile bool perluKirim = false; // counter lokal berubah, belum terkirim
+bool perluKirim = false; // counter lokal berubah, belum terkirim
+unsigned long waktuKirim = 0; // throttle retry tulis Firebase
 
 Servo servo1;
 Servo servo2;
@@ -49,7 +52,7 @@ ESP32PWM buzzer; // timer LEDC terpisah dari servo
 bool buzzerBunyi = false;
 unsigned long waktuBunyi = 0;
 
-volatile int counter = 0; // diakses loop & task callback stream
+int counter = 0;
 bool terdeteksi1 = false;
 bool terdeteksi2 = false;
 unsigned long waktuTerlihat1 = 0;      // waktu terakhir sensor 1 melihat objek
@@ -85,28 +88,6 @@ void updateLampu() {
   }
 }
 
-// Data dari Firebase (snapshot awal / diubah dari web/app) -> counter lokal
-void streamCallback(FirebaseStream data) {
-  if (perluKirim) return; // perubahan sensor lokal belum terkirim, jangan ditimpa
-
-  int nilai = -1;
-  if (data.dataType() == "json") { // snapshot awal "/" : {"kendaraan": 7}
-    FirebaseJsonData jsonData;
-    if (data.jsonObject().get(jsonData, "kendaraan")) nilai = jsonData.intValue;
-  } else if (data.dataPath() == "/kendaraan") { // perubahan tunggal
-    nilai = data.intData();
-  }
-
-  if (nilai < 0) return;
-  counter = min(nilai, KAPASITAS_MAX);
-  updateLampu();
-  Serial.printf("[Firebase] kendaraan = %d\n", counter);
-}
-
-void streamTimeoutCallback(bool timeout) {
-  if (timeout) Serial.println("[Firebase] Keep-Alive Ping OK.");
-}
-
 // Sinkronisasi waktu via NTP — wajib sebelum Firebase agar sertifikat TLS valid
 void syncNTP() {
   Serial.print("[NTP] Sinkronisasi waktu...");
@@ -115,14 +96,15 @@ void syncNTP() {
   Serial.println(getLocalTime(&timeinfo, 8000) ? " OK" : " TIMEOUT");
 }
 
-void connectWiFi() {
+bool connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return true;
   Serial.print("[WiFi] Menghubungkan");
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true); // reconnect otomatis kalau sinyal drop
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT) {
     Serial.print(".");
     delay(300);
   }
@@ -130,20 +112,18 @@ void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     WiFi.setSleep(false);
     Serial.printf("\n[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-  } else {
-    Serial.println("\n[WiFi] Gagal. Sistem jalan offline tanpa Firebase.");
+    return true;
   }
+  Serial.println("\n[WiFi] Gagal. Sistem jalan offline, dicoba lagi.");
+  return false;
 }
 
 void initFirebase() {
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
 
-  config.timeout.socketConnection    = 15000;
-  config.timeout.serverResponse      = 30000;
-  config.timeout.rtdbKeepAlive       = 45000;
-  config.timeout.rtdbStreamReconnect =  1000;
-  config.timeout.rtdbStreamError     =  3000;
+  config.timeout.socketConnection = 15000;
+  config.timeout.serverResponse   = 30000;
 
   // Login anonymous pakai API key (Authentication > Anonymous harus aktif)
   if (Firebase.signUp(&config, &auth, "", "")) {
@@ -155,25 +135,30 @@ void initFirebase() {
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
 
-  stream.setBSSLBufferSize(4096, 1024);
   fbdo.setBSSLBufferSize(4096, 1024);
-  stream.keepAlive(5, 5, 1);
 
   unsigned long t = millis();
   while (!Firebase.ready() && millis() - t < 5000) delay(100);
 
-  // beginStream DULU, setStreamCallback SETELAH (urutan terbalik bikin SSL bentrok)
-  if (Firebase.RTDB.beginStream(&stream, "/")) {
-    Serial.println("[Firebase] Stream aktif");
+  // Ambil nilai terakhir agar counter tidak reset 0 saat ESP32 reboot.
+  // Skip kalau sudah ada perubahan lokal (WiFi telat nyambung): nilai lokal lebih baru, nanti dikirim.
+  if (perluKirim) {
+    Serial.println("[Firebase] Ada perubahan offline, baca awal dilewati");
+  } else if (Firebase.RTDB.getInt(&fbdo, "/kendaraan")) {
+    counter = min(max(fbdo.intData(), 0), KAPASITAS_MAX);
+    updateLampu();
+    Serial.printf("[Firebase] Nilai awal kendaraan = %d\n", counter);
   } else {
-    Serial.printf("[Firebase] Stream gagal: %s\n", stream.errorReason().c_str());
+    Serial.printf("[Firebase] Baca awal gagal: %s\n", fbdo.errorReason().c_str());
   }
-  Firebase.RTDB.setStreamCallback(&stream, streamCallback, streamTimeoutCallback);
+
   firebaseAktif = true;
 }
 
 void setup() {
   Serial.begin(115200);
+  // Diagnosa restart: 1=poweron 3=software 4=panic 6=task-wdt 9=brownout
+  Serial.printf("[Boot] reset_reason=%d heap=%u\n", (int)esp_reset_reason(), (unsigned)esp_get_free_heap_size());
 
   pinMode(TRIG1, OUTPUT);
   pinMode(ECHO1, INPUT);
@@ -193,24 +178,30 @@ void setup() {
   servo2.setPeriodHertz(50);
   servo1.attach(SERVO1_PIN, 500, 2400);
   servo2.attach(SERVO2_PIN, 500, 2400);
-  servo1.write(SUDUT_TUTUP);
-  servo2.write(SUDUT_TUTUP);
+  servo1.write(SERVO1_TUTUP);
+  servo2.write(SERVO2_TUTUP);
 
   buzzer.attachPin(BUZZER_PIN, NADA_BUZZER, 10);
   buzzer.write(0); // diam
 
   updateLampu();
 
-  connectWiFi();
-  if (WiFi.status() == WL_CONNECTED) {
+  if (connectWiFi()) {
     syncNTP();
-    initFirebase(); // snapshot awal stream mengisi counter dari /kendaraan
+    initFirebase(); // nilai awal /kendaraan mengisi counter
   }
 
   Serial.println("Sistem siap. Kapasitas maks: 10 kendaraan");
 }
 
 void loop() {
+  // WiFi putus setelah boot -> Firebase.ready() false, tulis otomatis tertunda & retry.
+  // Sistem sensor tetap jalan offline selama itu.
+  if (!firebaseAktif && WiFi.status() == WL_CONNECTED) {
+    syncNTP();
+    initFirebase();
+  }
+
   // Sensor dianggap hadir selama jarak < JARAK_DETEKSI, dan baru dianggap
   // pergi setelah bebas deteksi terus-menerus WAKTU_LEPAS.
   // Tujuannya: pulseIn yang sesekali timeout (jarak 999) tidak dihitung
@@ -234,7 +225,7 @@ void loop() {
     if (counter < KAPASITAS_MAX) {
       counter++;
       perluKirim = true;
-      servo1.write(SUDUT_BUKA);
+      servo1.write(SERVO1_BUKA);
       servo1Buka = true;
       waktuBuka1 = millis();
       buzzer.writeTone(NADA_BUZZER);
@@ -253,7 +244,7 @@ void loop() {
     if (counter > 0) {
       counter--;
       perluKirim = true;
-      servo2.write(SUDUT_BUKA);
+      servo2.write(SERVO2_BUKA);
       servo2Buka = true;
       waktuBuka2 = millis();
       Serial.print("KELUAR | Gerbang keluar BUKA | Counter: ");
@@ -266,12 +257,12 @@ void loop() {
 
   // ===== TUTUP SERVO OTOMATIS =====
   if (servo1Buka && millis() - waktuBuka1 >= WAKTU_BUKA && !terdeteksi1) {
-    servo1.write(SUDUT_TUTUP);
+    servo1.write(SERVO1_TUTUP);
     servo1Buka = false;
     Serial.println("Gerbang masuk TUTUP");
   }
   if (servo2Buka && millis() - waktuBuka2 >= WAKTU_BUKA && !terdeteksi2) {
-    servo2.write(SUDUT_TUTUP);
+    servo2.write(SERVO2_TUTUP);
     servo2Buka = false;
     Serial.println("Gerbang keluar TUTUP");
   }
@@ -283,9 +274,11 @@ void loop() {
   }
 
   // ===== KIRIM KE FIREBASE =====
-  // Dikirim setelah buzzer mati: setInt blocking ~ratusan ms, jangan tahan bunyi.
-  // Gagal kirim -> perluKirim tetap true -> dicoba lagi loop berikutnya.
-  if (firebaseAktif && perluKirim && !buzzerBunyi && Firebase.ready()) {
+  // setInt blocking (~0.2-0.5 s) -> true hanya jika server balas 200, jadi nilai DB pasti = counter.
+  // Async (print=silent) dulu: true cuma berarti terkirim ke socket, bisa hilang -> DB selisih.
+  // Gagal -> perluKirim tetap true, retry tiap 1 s (tidak spam saat offline).
+  if (firebaseAktif && perluKirim && millis() - waktuKirim >= 1000 && Firebase.ready()) {
+    waktuKirim = millis();
     if (Firebase.RTDB.setInt(&fbdo, "/kendaraan", counter)) {
       perluKirim = false;
       Serial.printf("[Firebase] Kirim kendaraan = %d OK\n", counter);
